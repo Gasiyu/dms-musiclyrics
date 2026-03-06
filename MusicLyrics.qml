@@ -14,16 +14,11 @@ PluginComponent {
     property string navidromeUser: pluginData.navidromeUser ?? ""
     property string navidromePassword: pluginData.navidromePassword ?? ""
     property bool cachingEnabled: pluginData.cachingEnabled ?? true
+    property string statusPaneButton: pluginData.statusPaneButton ?? "left"
+    property string lyricsPaneButton: pluginData.lyricsPaneButton ?? "right"
 
-    property MprisPlayer activePlayer: MprisController.activePlayer
+    readonly property MprisPlayer activePlayer: MprisController.activePlayer
     property var allPlayers: MprisController.availablePlayers
-
-    onActivePlayerChanged: {
-        if (!activePlayer && allPlayers && allPlayers.length > 0) {
-            console.info("[MusicLyrics] Active player closed, falling back to " + (allPlayers[0].identity || "unknown player"));
-            MprisController.activePlayer = allPlayers[0];
-        }
-    }
 
     // -------------------------------------------------------------------------
     // Enum namespaces
@@ -93,6 +88,7 @@ PluginComponent {
     property real currentDuration: activePlayer?.length ?? 0
 
     // Current lyric line for bar pill display
+
     property string currentLyricText: {
         if (lyricsLoading)
             return "Searching lyrics…";
@@ -119,6 +115,9 @@ PluginComponent {
     }
     onCurrentTitleChanged: fetchDebounceTimer.restart()
     onCurrentArtistChanged: fetchDebounceTimer.restart()
+
+    // Force-update toggle to poll MPRIS position
+    property bool _forceUpdate: false
 
     // -------------------------------------------------------------------------
     // Helpers
@@ -374,7 +373,7 @@ PluginComponent {
                 for (var key in customHeaders)
                     currentXhr.setRequestHeader(key, customHeaders[key]);
             } else {
-                currentXhr.setRequestHeader("User-Agent", "DankMaterialShell MusicLyrics/1.2.0 (https://github.com/Gasiyu/dms-plugin-musiclyrics)");
+                currentXhr.setRequestHeader("User-Agent", "DankMaterialShell MusicLyrics/1.4.0 (https://github.com/Gasiyu/dms-plugin-musiclyrics)");
                 currentXhr.setRequestHeader("Accept", "application/json");
             }
             currentXhr.send();
@@ -926,235 +925,267 @@ PluginComponent {
 
     Component {
         id: hPillComponent
-        Row {
-            spacing: Theme.spacingS
+        Item {
+            implicitWidth: contentRow.implicitWidth
+            implicitHeight: contentRow.implicitHeight
 
-            Rectangle {
-                width: chipContent.implicitWidth + Theme.spacingS * 2
-                height: Theme.fontSizeSmall + Theme.spacingXS
-                radius: 12
-                anchors.verticalCenter: parent.verticalCenter
-                color: Theme.primary
+            Row {
+                id: contentRow
+                spacing: Theme.spacingS
 
-                Row {
-                    id: chipContent
-                    anchors.centerIn: parent
-                    spacing: Theme.spacingXS
+                Rectangle {
+                    width: chipContent.implicitWidth + Theme.spacingS * 2
+                    height: Theme.fontSizeSmall + Theme.spacingXS
+                    radius: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: Theme.primary
 
-                    DankIcon {
-                        anchors.verticalCenter: parent.verticalCenter
-                        name: activePlayer && activePlayer.playbackState === MprisPlaybackState.Playing ? "lyrics" : "pause"
-                        size: Theme.fontSizeSmall
-                        color: Theme.background
+                    Row {
+                        id: chipContent
+                        anchors.centerIn: parent
+                        spacing: Theme.spacingXS
+
+                        DankIcon {
+                            anchors.verticalCenter: parent.verticalCenter
+                            name: activePlayer && activePlayer.playbackState === MprisPlaybackState.Playing ? "lyrics" : "pause"
+                            size: Theme.fontSizeSmall
+                            color: Theme.background
+                        }
+
+                        StyledText {
+                            text: root.lyricSource === lyricSrc.navidrome ? "Navidrome" : root.lyricSource === lyricSrc.lrclib ? "lrclib" : root.lyricSource === lyricSrc.musixmatch ? "Musixmatch" : ""
+                            font.pixelSize: Theme.fontSizeSmall
+                            color: Theme.background
+                            anchors.verticalCenter: parent.verticalCenter
+                            maximumLineCount: 1
+                            elide: Text.ElideRight
+                            visible: root.lyricsLines.length > 0
+                        }
                     }
+                }
 
-                    StyledText {
-                        text: root.lyricSource === lyricSrc.navidrome ? "Navidrome" : root.lyricSource === lyricSrc.lrclib ? "lrclib" : root.lyricSource === lyricSrc.musixmatch ? "Musixmatch" : ""
-                        font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.background
-                        anchors.verticalCenter: parent.verticalCenter
-                        maximumLineCount: 1
-                        elide: Text.ElideRight
-                        visible: root.lyricsLines.length > 0
-                    }
+                StyledText {
+                    text: root.currentLyricText
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.surfaceText
+                    anchors.verticalCenter: parent.verticalCenter
+                    maximumLineCount: 1
+                    elide: Text.ElideRight
+                    width: Math.min(implicitWidth, 300)
                 }
             }
 
-            StyledText {
-                text: root.currentLyricText
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceText
-                anchors.verticalCenter: parent.verticalCenter
-                maximumLineCount: 1
-                elide: Text.ElideRight
-                width: Math.min(implicitWidth, 300)
+            MouseArea {
+                id: hInteractiveArea
+                anchors.fill: parent
+                enabled: root.statusPaneButton === "middle" || root.lyricsPaneButton === "middle"
+                acceptedButtons: Qt.MiddleButton
+                z: 1000
+                onPressed: mouse => {
+                    root.handleMappedMouseAction("middle", contentRow, 0, 0, 0, "", null)
+                    mouse.accepted = true
+                }
             }
         }
     }
 
     verticalBarPill: root.activePlayer ? vPillComponent : null
+    pillClickAction: (x, y, width, section, screen) => {
+        handleMappedMouseAction("left", null, x, y, width, section, screen)
+    }
+    pillRightClickAction: (x, y, width, section, screen) => {
+        handleMappedMouseAction("right", null, x, y, width, section, screen)
+    }
 
     Component {
         id: vPillComponent
-        Column {
-            spacing: Theme.spacingXS
+        Item {
+            implicitWidth: contentColumn.implicitWidth
+            implicitHeight: contentColumn.implicitHeight
 
-            DankIcon {
-                name: "lyrics"
-                size: Theme.iconSize
-                color: root.lyricsLines.length > 0 ? Theme.primary : Theme.surfaceVariantText
-                anchors.horizontalCenter: parent.horizontalCenter
+            Column {
+                id: contentColumn
+                spacing: Theme.spacingXS
+
+                DankIcon {
+                    name: "lyrics"
+                    size: Theme.iconSize
+                    color: root.lyricsLines.length > 0 ? Theme.primary : Theme.surfaceVariantText
+                    anchors.horizontalCenter: parent.horizontalCenter
+                }
+
+                StyledText {
+                    text: "♪"
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.surfaceText
+                    anchors.horizontalCenter: parent.horizontalCenter
+                }
             }
 
-            StyledText {
-                text: "♪"
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceText
-                anchors.horizontalCenter: parent.horizontalCenter
+            MouseArea {
+                id: vInteractiveArea
+                anchors.fill: parent
+                enabled: root.statusPaneButton === "middle" || root.lyricsPaneButton === "middle"
+                acceptedButtons: Qt.MiddleButton
+                z: 1000
+                onPressed: mouse => {
+                    root.handleMappedMouseAction("middle", contentColumn, 0, 0, 0, "", null)
+                    mouse.accepted = true
+                }
             }
         }
     }
 
     // -------------------------------------------------------------------------
-    // Popout: Status + Media Player Selector
+    // Popout: Now Playing + Lyrics Sources
     // -------------------------------------------------------------------------
 
-    popoutContent: Component {
-        PopoutComponent {
-            headerText: "Music Lyrics"
-            detailsText: root.currentTitle ? (root.currentArtist + " — " + root.currentTitle) : "No track playing"
-            showCloseButton: true
+    function _formatDuration(seconds) {
+        if (seconds <= 0) return "—";
+        var m = Math.floor(seconds / 60);
+        var s = Math.floor(seconds % 60);
+        return m + ":" + ("0" + s).slice(-2);
+    }
 
-            Item {
+    function mappedActionForButton(button) {
+        // If both actions use the same button, prioritize Lyrics pane.
+        if (lyricsPaneButton === button)
+            return "lyrics";
+        if (statusPaneButton === button)
+            return "status";
+        return "none";
+    }
+
+    function handleMappedMouseAction(button, sourceItem, x, y, width, triggerSection, screenObj) {
+        const action = mappedActionForButton(button);
+        if (action === "status") {
+            const savedPillClickAction = root.pillClickAction;
+            root.pillClickAction = null;
+            try {
+                root.triggerPopout();
+            } finally {
+                root.pillClickAction = savedPillClickAction;
+            }
+            return;
+        }
+        if (action !== "lyrics")
+            return;
+
+        if (sourceItem) {
+            const currentScreen = parentScreen || Screen;
+            const globalPos = sourceItem.mapToItem(null, 0, 0);
+            const barPosition = axis?.edge === "left" ? 2 : (axis?.edge === "right" ? 3 : (axis?.edge === "bottom" ? 1 : 0));
+            const triggerWidth = Math.max(barThickness || 0, sourceItem.width || 0, sourceItem.implicitWidth || 0);
+            const pos = SettingsData.getPopupTriggerPosition(globalPos, currentScreen, barThickness, triggerWidth, barSpacing, barPosition, barConfig);
+            toggleLyricsOnlyPopout(pos.x, pos.y, pos.width, root.section, currentScreen);
+            return;
+        }
+
+        toggleLyricsOnlyPopout(x, y, width, triggerSection, screenObj);
+    }
+
+    function toggleLyricsOnlyPopout(x, y, width, triggerSection, screenObj) {
+        const currentScreen = screenObj || parentScreen || Screen
+        if (!currentScreen)
+            return
+        const barPosition = axis?.edge === "left" ? 2 : (axis?.edge === "right" ? 3 : (axis?.edge === "bottom" ? 1 : 0))
+
+        lyricsOnlyPopout.setTriggerPosition(
+            x || 0,
+            y || 0,
+            width || barThickness,
+            triggerSection || section || "",
+            currentScreen,
+            barPosition,
+            barThickness,
+            barSpacing,
+            barConfig
+        )
+        lyricsOnlyPopout.toggle()
+    }
+
+    DankPopout {
+        id: lyricsOnlyPopout
+        layerNamespace: "dms:musiclyrics-lyrics-only"
+        popupWidth: 500
+        popupHeight: 620
+        onBackgroundClicked: close()
+
+        content: Component {
+            Rectangle {
                 width: parent.width
-                height: 300
+                height: 560
+                radius: Theme.cornerRadius
+                color: Theme.surfaceContainer
 
-                Column {
+                Flickable {
+                    id: lyricsFlick
                     anchors.fill: parent
-                    spacing: Theme.spacingM
+                    anchors.margins: Theme.spacingM
+                    clip: true
+                    contentHeight: lyricsColumn.implicitHeight
 
-                    // Divider
-                    Rectangle {
-                        width: parent.width
-                        height: 1
-                        color: Theme.withAlpha(Theme.outlineStrong, 0.3)
-                    }
-
-                    // --- Status Chips Section ---
                     Column {
-                        width: parent.width
+                        id: lyricsColumn
+                        width: lyricsFlick.width
                         spacing: Theme.spacingS
 
                         StyledText {
-                            text: "Lyrics Status"
-                            font.pixelSize: Theme.fontSizeMedium
+                            text: "Lyrics"
+                            font.pixelSize: Theme.fontSizeLarge
                             font.weight: Font.DemiBold
-                            color: Theme.surfaceVariantText
-                        }
-
-                        StatusChipRow {
-                            label: "Cache"
-                            status: root.cacheStatus
-                        }
-                        StatusChipRow {
-                            label: "Navidrome"
-                            status: root.navidromeStatus
-                        }
-                        StatusChipRow {
-                            label: "Musixmatch"
-                            status: root.musixmatchStatus
-                        }
-                        StatusChipRow {
-                            label: "lrclib"
-                            status: root.lrclibStatus
-                        }
-                    }
-
-                    // Divider
-                    Rectangle {
-                        width: parent.width
-                        height: 1
-                        color: Theme.withAlpha(Theme.outlineStrong, 0.3)
-                    }
-
-                    // --- Media Players Section ---
-                    Column {
-                        width: parent.width
-                        spacing: Theme.spacingS
-
-                        StyledText {
-                            text: "Media Players"
-                            font.pixelSize: Theme.fontSizeMedium
-                            font.weight: Font.DemiBold
-                            color: Theme.surfaceVariantText
+                            color: Theme.primary
                         }
 
                         StyledText {
-                            text: "No media players detected"
+                            text: root.currentTitle || "No track"
+                            font.pixelSize: Theme.fontSizeLarge
+                            font.weight: Font.DemiBold
+                            color: Theme.surfaceText
+                            maximumLineCount: 2
+                            wrapMode: Text.WordWrap
+                        }
+
+                        StyledText {
+                            text: root.currentArtist || ""
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.surfaceVariantText
-                            visible: !root.allPlayers || root.allPlayers.length === 0
+                            visible: text.length > 0
+                            maximumLineCount: 1
+                            elide: Text.ElideRight
                         }
 
-                        ListView {
-                            id: playerListView
+                        Rectangle {
                             width: parent.width
-                            height: Math.min(contentHeight, 200)
-                            clip: true
-                            visible: root.allPlayers && root.allPlayers.length > 0
-                            model: root.allPlayers
-                            spacing: Theme.spacingXS
+                            height: 1
+                            color: Theme.outline
+                            opacity: 0.4
+                        }
 
-                            delegate: Rectangle {
-                                id: playerDelegate
-                                required property var modelData
-                                width: playerListView.width
-                                height: playerRow.implicitHeight + Theme.spacingS * 2
-                                radius: Theme.cornerRadius
-                                color: modelData === root.activePlayer ? Theme.withAlpha(Theme.primary, 0.15) : playerMouse.containsMouse ? Theme.surfaceContainerHighest : Theme.surfaceContainerHigh
+                        StyledText {
+                            visible: root.lyricsLoading
+                            text: "Searching lyrics..."
+                            font.pixelSize: Theme.fontSizeMedium
+                            color: Theme.surfaceVariantText
+                        }
 
-                                Row {
-                                    id: playerRow
-                                    anchors {
-                                        left: parent.left
-                                        right: parent.right
-                                        verticalCenter: parent.verticalCenter
-                                        margins: Theme.spacingS
-                                    }
-                                    spacing: Theme.spacingS
+                        StyledText {
+                            visible: !root.lyricsLoading && root.lyricsLines.length === 0
+                            text: "No lyrics found."
+                            font.pixelSize: Theme.fontSizeMedium
+                            color: Theme.surfaceVariantText
+                        }
 
-                                    DankIcon {
-                                        name: modelData.playbackState === MprisPlaybackState.Playing ? "play_circle" : "pause_circle"
-                                        size: Theme.iconSize
-                                        color: modelData === root.activePlayer ? Theme.primary : Theme.surfaceText
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-
-                                    Column {
-                                        spacing: 2
-                                        width: parent.width - Theme.iconSize - Theme.spacingS
-                                        anchors.verticalCenter: parent.verticalCenter
-
-                                        StyledText {
-                                            text: modelData.identity || "Unknown Player"
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            font.weight: modelData === root.activePlayer ? Font.Bold : Font.Normal
-                                            color: modelData === root.activePlayer ? Theme.primary : Theme.surfaceText
-                                            width: parent.width
-                                            elide: Text.ElideRight
-                                            maximumLineCount: 1
-                                        }
-
-                                        StyledText {
-                                            text: {
-                                                var title = modelData.trackTitle || "";
-                                                var artist = modelData.trackArtist || "";
-                                                if (title && artist)
-                                                    return artist + " — " + title;
-                                                return title || "No track";
-                                            }
-                                            font.pixelSize: Theme.fontSizeSmall * 0.9
-                                            color: Theme.surfaceVariantText
-                                            width: parent.width
-                                            elide: Text.ElideRight
-                                            maximumLineCount: 1
-                                        }
-                                    }
-                                }
-
-                                MouseArea {
-                                    id: playerMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: MprisController.activePlayer = playerDelegate.modelData
-                                }
-
-                                Behavior on color {
-                                    ColorAnimation {
-                                        duration: 150
-                                    }
-                                }
+                        Repeater {
+                            model: root.lyricsLines.length
+                            delegate: StyledText {
+                                required property int index
+                                text: root.lyricsLines[index].text || ""
+                                width: lyricsColumn.width
+                                wrapMode: Text.WordWrap
+                                font.pixelSize: Theme.fontSizeMedium
+                                color: index === root.currentLineIndex ? Theme.primary : Theme.surfaceText
+                                font.weight: index === root.currentLineIndex ? Font.DemiBold : Font.Normal
                             }
                         }
                     }
@@ -1163,56 +1194,364 @@ PluginComponent {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Reusable status chip row
-    // -------------------------------------------------------------------------
+    popoutContent: Component {
+        PopoutComponent {
+            headerText: "Music Lyrics"
 
-    component StatusChipRow: Row {
-        id: chipRow
-        property string label: ""
-        property int status: 0
+            Item {
+                width: parent.width
+                implicitHeight: popoutLayout.implicitHeight
 
-        spacing: Theme.spacingS
-        visible: status !== 0
+                Column {
+                    id: popoutLayout
+                    width: parent.width
+                    spacing: Theme.spacingM
 
-        Rectangle {
-            width: innerChipRow.implicitWidth + Theme.spacingM * 2
-            height: 28
-            radius: 14
-            color: Theme.withAlpha(root.chipColor(chipRow.status), 0.15)
+                    // ── Now Playing Card ──
+                    Rectangle {
+                        width: parent.width
+                        height: nowPlayingContent.implicitHeight + Theme.spacingM * 2
+                        radius: Theme.cornerRadius
+                        color: root.activePlayer
+                              ? Theme.withAlpha(Theme.primary, 0.08)
+                              : Theme.withAlpha(Theme.surfaceContainerHighest, 0.5)
 
-            Row {
-                id: innerChipRow
-                anchors.centerIn: parent
-                spacing: Theme.spacingXS
+                        Row {
+                            id: nowPlayingContent
+                            anchors {
+                                left: parent.left; right: parent.right
+                                top: parent.top
+                                margins: Theme.spacingM
+                            }
+                            spacing: Theme.spacingM
 
-                DankIcon {
-                    name: root.chipIcon(chipRow.status)
-                    size: 14
-                    color: root.chipColor(chipRow.status)
-                    anchors.verticalCenter: parent.verticalCenter
-                }
+                            // Track info column (takes remaining space)
+                            Column {
+                                width: _coverArt.visible
+                                       ? parent.width - _coverArt.width - parent.spacing
+                                       : parent.width
+                                spacing: Theme.spacingS
 
-                StyledText {
-                    text: chipRow.label
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.weight: Font.DemiBold
-                    color: root.chipColor(chipRow.status)
-                    anchors.verticalCenter: parent.verticalCenter
+                                // Header row: icon + "Now Playing"
+                                Row {
+                                    spacing: Theme.spacingS
+                                    width: parent.width
+
+                                    DankIcon {
+                                        name: root.activePlayer && root.activePlayer.playbackState === MprisPlaybackState.Playing
+                                              ? "play_circle" : "pause_circle"
+                                        size: 20
+                                        color: root.activePlayer ? Theme.primary : Theme.surfaceVariantText
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+
+                                    StyledText {
+                                        text: root.activePlayer ? "Now Playing - " + (root.activePlayer.identity || "Unknown Player") : "No Active Player"
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        font.weight: Font.DemiBold
+                                        color: root.activePlayer ? Theme.primary : Theme.surfaceVariantText
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                }
+
+                                // Song title
+                                StyledText {
+                                    width: parent.width
+                                    text: root.currentTitle || "—"
+                                    font.pixelSize: Theme.fontSizeLarge + 2
+                                    font.weight: Font.Bold
+                                    color: Theme.surfaceText
+                                    maximumLineCount: 2
+                                    elide: Text.ElideRight
+                                    wrapMode: Text.WordWrap
+                                    visible: root.activePlayer
+                                }
+
+                                // Artist & Album
+                                Column {
+                                    width: parent.width
+                                    spacing: 2
+                                    visible: root.activePlayer
+
+                                    Row {
+                                        spacing: Theme.spacingXS
+                                        DankIcon {
+                                            name: "person"
+                                            size: 14
+                                            color: Theme.surfaceVariantText
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        StyledText {
+                                            text: root.currentArtist || "Unknown Artist"
+                                            font.pixelSize: Theme.fontSizeMedium
+                                            color: Theme.surfaceText
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            maximumLineCount: 1
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+
+                                    Row {
+                                        spacing: Theme.spacingXS
+                                        visible: root.currentAlbum !== ""
+                                        DankIcon {
+                                            name: "album"
+                                            size: 14
+                                            color: Theme.surfaceVariantText
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        StyledText {
+                                            text: root.currentAlbum
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            color: Theme.surfaceVariantText
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            maximumLineCount: 1
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+                                }
+
+                                // Progress bar with timestamps
+                                Column {
+                                    width: parent.width
+                                    spacing: 4
+                                    visible: root.activePlayer && root.currentDuration > 0
+
+                                    DankSeekbar {
+                                        id: progressSeekbar
+                                        width: parent.width
+                                        height: 20
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        activePlayer: root.activePlayer
+                                    }
+
+                                    // Poll MPRIS position to keep seekbar and time text updated
+                                    Timer {
+                                        interval: 50
+                                        running: root.activePlayer !== null
+                                        repeat: true
+                                        onTriggered: {
+                                            if (progressSeekbar && root.activePlayer) {
+                                                try {
+                                                    var pos = root.activePlayer.position || 0;
+                                                    var len = Math.max(1, root.activePlayer.length || 1);
+                                                    progressSeekbar.value = Math.min(1, pos / len);
+                                                } catch (e) {}
+                                            }
+                                            root._forceUpdate = !root._forceUpdate;
+                                        }
+                                    }
+
+                                    Row {
+                                        width: parent.width
+
+                                        StyledText {
+                                            id: _currentTime
+                                            text: {
+                                                void root._forceUpdate; // depend on polling toggle
+                                                if (!activePlayer)
+                                                    return "0:00";
+                                                const rawPos = Math.max(0, activePlayer.position || 0);
+                                                const pos = activePlayer.length ? rawPos % Math.max(1, activePlayer.length) : rawPos;
+                                                const minutes = Math.floor(pos / 60);
+                                                const seconds = Math.floor(pos % 60);
+                                                const timeStr = minutes + ":" + (seconds < 10 ? "0" : "") + seconds;
+                                                return timeStr;
+                                            }
+                                            font.pixelSize: Theme.fontSizeSmall - 1
+                                            color: Theme.surfaceVariantText
+                                        }
+
+                                        Item { width: parent.width - _currentTime.implicitWidth - _endTime.implicitWidth; height: 1 }
+
+                                        StyledText {
+                                            id: _endTime
+                                            text: {
+                                                if (!activePlayer || !activePlayer.length)
+                                                    return "0:00";
+                                                const dur = Math.max(0, activePlayer.length || 0);
+                                                const minutes = Math.floor(dur / 60);
+                                                const seconds = Math.floor(dur % 60);
+                                                return minutes + ":" + (seconds < 10 ? "0" : "") + seconds;
+                                            }
+                                            font.pixelSize: Theme.fontSizeSmall - 1
+                                            color: Theme.surfaceVariantText
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Album cover art
+                            DankAlbumArt {
+                                id: _coverArt
+                                width: 80
+                                height: 80
+                                visible: root.activePlayer && (root.activePlayer.trackArtUrl ?? "") !== ""
+                                anchors.verticalCenter: parent.verticalCenter
+                                activePlayer: root.activePlayer
+                                showAnimation: true
+                            }
+                        }
+                    }
+
+                    // ── Section label ──
+                    StyledText {
+                        text: "Lyrics Sources"
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.weight: Font.DemiBold
+                        color: Theme.surfaceVariantText
+                        leftPadding: Theme.spacingXS
+                    }
+
+                    // ── Source Cards ──
+                    Column {
+                        width: parent.width
+                        spacing: Theme.spacingS
+
+                        SourceCard {
+                            width: parent.width
+                            icon: "cached"
+                            label: "Cache"
+                            sourceStatus: root.cacheStatus
+                        }
+
+                        SourceCard {
+                            width: parent.width
+                            icon: "cloud"
+                            label: "Navidrome"
+                            sourceStatus: root.navidromeStatus
+                        }
+
+                        SourceCard {
+                            width: parent.width
+                            icon: "music_note"
+                            label: "Musixmatch"
+                            sourceStatus: root.musixmatchStatus
+                        }
+
+                        SourceCard {
+                            width: parent.width
+                            icon: "library_music"
+                            label: "lrclib"
+                            sourceStatus: root.lrclibStatus
+                        }
+                    }
                 }
             }
         }
+    }
 
-        StyledText {
-            text: root.chipLabel(chipRow.status)
-            font.pixelSize: Theme.fontSizeSmall
-            color: Theme.surfaceText
-            anchors.verticalCenter: parent.verticalCenter
+    // -------------------------------------------------------------------------
+    // Reusable source status card
+    // -------------------------------------------------------------------------
+
+    component SourceCard: Rectangle {
+        id: sourceCard
+        property string icon: ""
+        property string label: ""
+        property int sourceStatus: 0
+
+        height: 44
+        radius: Theme.cornerRadius
+        color: sourceStatus === 0
+               ? Theme.withAlpha(Theme.surfaceContainerHighest, 0.3)
+               : Theme.withAlpha(root.chipColor(sourceStatus), 0.06)
+        visible: true
+
+        Row {
+            anchors {
+                left: parent.left; right: parent.right
+                verticalCenter: parent.verticalCenter
+                leftMargin: Theme.spacingM; rightMargin: Theme.spacingM
+            }
+            spacing: Theme.spacingS
+
+            // Source icon
+            Rectangle {
+                width: 28
+                height: 28
+                radius: 14
+                color: sourceCard.sourceStatus === 0
+                       ? Theme.withAlpha(Theme.surfaceContainerHighest, 0.5)
+                       : Theme.withAlpha(root.chipColor(sourceCard.sourceStatus), 0.15)
+                anchors.verticalCenter: parent.verticalCenter
+
+                DankIcon {
+                    anchors.centerIn: parent
+                    name: sourceCard.icon
+                    size: 14
+                    color: sourceCard.sourceStatus === 0
+                           ? Theme.surfaceVariantText
+                           : root.chipColor(sourceCard.sourceStatus)
+                }
+            }
+
+            // Label
+            StyledText {
+                text: sourceCard.label
+                font.pixelSize: Theme.fontSizeMedium
+                font.weight: Font.DemiBold
+                color: Theme.surfaceText
+                anchors.verticalCenter: parent.verticalCenter
+                width: 90
+            }
+
+            // Status chip – fills remaining width
+            Item {
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - parent.spacing * 2 - 28 - 90
+                height: 22
+
+                Rectangle {
+                    visible: sourceCard.sourceStatus !== 0
+                    anchors.fill: parent
+                    radius: 11
+                    color: Theme.withAlpha(root.chipColor(sourceCard.sourceStatus), 0.15)
+
+                    Row {
+                        id: statusChipContent
+                        anchors.centerIn: parent
+                        spacing: 4
+
+                        DankIcon {
+                            name: root.chipIcon(sourceCard.sourceStatus)
+                            size: 12
+                            color: root.chipColor(sourceCard.sourceStatus)
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        StyledText {
+                            text: root.chipLabel(sourceCard.sourceStatus)
+                            font.pixelSize: Theme.fontSizeSmall - 1
+                            color: root.chipColor(sourceCard.sourceStatus)
+                            anchors.verticalCenter: parent.verticalCenter
+                            maximumLineCount: 1
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+
+                // Idle label when no status
+                Rectangle {
+                    visible: sourceCard.sourceStatus === 0
+                    anchors.fill: parent
+                    radius: 11
+                    color: Theme.withAlpha(Theme.surfaceContainerHighest, 0.3)
+
+                    StyledText {
+                        anchors.centerIn: parent
+                        text: "Idle"
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.surfaceVariantText
+                        maximumLineCount: 1
+                    }
+                }
+            }
         }
     }
 
     popoutWidth: 380
-    popoutHeight: 480
+    popoutHeight: 520
 
     Component.onCompleted: {
         console.info("[MusicLyrics] Plugin loaded");
