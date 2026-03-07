@@ -46,8 +46,16 @@ PluginSettings {
             ToggleSetting {
                 settingKey: "cachingEnabled"
                 label: "Local Cache"
-                description: "Save downloaded lyrics locally to speed up loading times and reduce network requests. Lyrics files will be stored under ~/.cache/musicLyrics directories."
+                description: "Save downloaded lyrics locally to speed up loading times and reduce network requests."
                 defaultValue: true
+            }
+
+            StringSetting {
+                settingKey: "lyricsDirectory"
+                label: "Lyrics Directory"
+                description: "Directory used to store cached lyrics files."
+                placeholder: "$HOME/.config/DankMaterialShell/plugins/musiclyrics/lyrics"
+                defaultValue: "$HOME/.config/DankMaterialShell/plugins/musiclyrics/lyrics"
             }
         }
     }

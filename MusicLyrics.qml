@@ -163,7 +163,17 @@ PluginComponent {
         return _fnv1a32((title + "\x00" + artist).toLowerCase());
     }
 
-    readonly property string _cacheDir: (Quickshell.env("HOME") || "") + "/.cache/musicLyrics"
+    readonly property string _defaultLyricsDir: "$HOME/.config/DankMaterialShell/plugins/musiclyrics/lyrics"
+    readonly property string _cacheDir: {
+        const homeDir = Quickshell.env("HOME") || "";
+        const configured = (pluginData.lyricsDirectory || _defaultLyricsDir).trim();
+        const rawPath = configured.length > 0 ? configured : _defaultLyricsDir;
+        if (rawPath.startsWith("$HOME/") && homeDir.length > 0)
+            return homeDir + rawPath.substring(5);
+        if (rawPath.startsWith("~/") && homeDir.length > 0)
+            return homeDir + rawPath.substring(1);
+        return rawPath;
+    }
 
     function _cacheFilePath(title, artist) {
         return _cacheDir + "/" + _cacheKey(title, artist) + ".json";
@@ -201,6 +211,10 @@ PluginComponent {
             return;
         _cacheDirReady = true;
         mkdirProcess.running = true;
+    }
+
+    on_CacheDirChanged: {
+        _cacheDirReady = false;
     }
 
     // Cache read using FileView
