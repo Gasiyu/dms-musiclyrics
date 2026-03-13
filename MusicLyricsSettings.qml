@@ -46,8 +46,71 @@ PluginSettings {
             ToggleSetting {
                 settingKey: "cachingEnabled"
                 label: "Local Cache"
-                description: "Save downloaded lyrics locally to speed up loading times and reduce network requests. Lyrics files will be stored under ~/.cache/musicLyrics directories."
+                description: "Save downloaded lyrics locally to speed up loading times and reduce network requests."
                 defaultValue: true
+            }
+
+            StringSetting {
+                settingKey: "lyricsDirectory"
+                label: "Lyrics Directory"
+                description: "Directory used to store cached lyrics files."
+                placeholder: "$HOME/.cache/musicLyrics"
+                defaultValue: "$HOME/.cache/musicLyrics"
+            }
+
+            StringSetting {
+                settingKey: "extraLrcDirectory"
+                label: ".lrc Directory"
+                description: "Optional directory to search for .lrc files."
+                placeholder: ""
+                defaultValue: ""
+            }
+        }
+    }
+
+    StyledRect {
+        width: parent.width
+        height: interactionColumn.implicitHeight + Theme.spacingL * 2
+        radius: Theme.cornerRadius
+        color: Theme.surfaceContainerHigh
+
+        Column {
+            id: interactionColumn
+            anchors.fill: parent
+            anchors.margins: Theme.spacingL
+            spacing: Theme.spacingM
+
+            StyledText {
+                text: "Interaction"
+                font.pixelSize: Theme.fontSizeMedium
+                font.weight: Font.Medium
+                color: Theme.surfaceText
+            }
+
+            SelectionSetting {
+                settingKey: "statusPaneButton"
+                label: "Lyrics Status"
+                description: "Mouse button for the default status pane."
+                defaultValue: "left"
+                options: [
+                    { label: "Disabled", value: "disabled" },
+                    { label: "Left click", value: "left" },
+                    { label: "Right click", value: "right" },
+                    { label: "Middle click", value: "middle" }
+                ]
+            }
+
+            SelectionSetting {
+                settingKey: "lyricsPaneButton"
+                label: "Lyrics"
+                description: "Mouse button for the lyrics pane."
+                defaultValue: "right"
+                options: [
+                    { label: "Disabled", value: "disabled" },
+                    { label: "Left click", value: "left" },
+                    { label: "Right click", value: "right" },
+                    { label: "Middle click", value: "middle" }
+                ]
             }
         }
     }

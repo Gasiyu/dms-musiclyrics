@@ -14,6 +14,9 @@ PluginComponent {
     property string navidromeUser: pluginData.navidromeUser ?? ""
     property string navidromePassword: pluginData.navidromePassword ?? ""
     property bool cachingEnabled: pluginData.cachingEnabled ?? true
+    property string extraLrcDirectory: pluginData.extraLrcDirectory ?? ""
+    property string statusPaneButton: pluginData.statusPaneButton ?? "left"
+    property string lyricsPaneButton: pluginData.lyricsPaneButton ?? "right"
 
     readonly property MprisPlayer activePlayer: MprisController.activePlayer
     property var allPlayers: MprisController.availablePlayers
@@ -56,6 +59,9 @@ PluginComponent {
         readonly property int lrclib: 2
         readonly property int cache: 3
         readonly property int musixmatch: 4
+        readonly property int local: 5 // legacy local source id (kept for cached entries)
+        readonly property int metadata: 6
+        readonly property int localLrc: 7
     }
 
     // -------------------------------------------------------------------------
@@ -74,6 +80,8 @@ PluginComponent {
     property int lrclibStatus: status.none
     property int musixmatchStatus: status.none
     property int cacheStatus: status.none
+    property int metadataStatus: status.none
+    property int localLrcStatus: status.none
 
     // Fetch state and source
     property int lyricStatus: lyricState.idle
@@ -128,6 +136,8 @@ PluginComponent {
         lrclibStatus = status.none;
         musixmatchStatus = status.none;
         cacheStatus = status.none;
+        metadataStatus = status.none;
+        localLrcStatus = status.none;
         lyricStatus = lyricState.loading;
         lyricSource = lyricSrc.none;
     }
@@ -143,6 +153,70 @@ PluginComponent {
         lrclibStatus = lrclibStatusVal;
         lyricStatus = lyricState.notFound;
         root._cancelActiveFetch = null;
+    }
+
+    function _normalizeIdleSourceStatuses() {
+        if (metadataStatus === status.none)
+            metadataStatus = status.skippedConfig;
+        if (localLrcStatus === status.none)
+            localLrcStatus = status.skippedConfig;
+    }
+
+    function _expandHomePath(rawPath, fallbackPath) {
+        const homeDir = Quickshell.env("HOME") || "";
+        const raw = (rawPath || fallbackPath || "").trim();
+        const path = raw.length > 0 ? raw : (fallbackPath || "");
+        if (path.startsWith("$HOME/") && homeDir.length > 0)
+            return homeDir + path.substring(5);
+        if (path.startsWith("~/") && homeDir.length > 0)
+            return homeDir + path.substring(1);
+        return path;
+    }
+
+    function _resetLocalLookupProcess() {
+        if (localLyricsLookupProcess.running)
+            localLyricsLookupProcess.running = false;
+        _localLyricsCallback = null;
+        _localLyricsStdout = "";
+    }
+
+    function _cancelInFlightLookups() {
+        if (_cancelActiveFetch) {
+            _cancelActiveFetch();
+            _cancelActiveFetch = null;
+        }
+        _resetLocalLookupProcess();
+    }
+
+    function _setRemoteStatusesSkippedFound() {
+        navidromeStatus = status.skippedFound;
+        lrclibStatus = status.skippedFound;
+        musixmatchStatus = status.skippedFound;
+    }
+
+    function _setLocalStatusesForSource(localSource, hasTrackPath) {
+        metadataStatus = localSource === "metadata" ? status.found : (hasTrackPath ? status.notFound : status.skippedConfig);
+        localLrcStatus = localSource === "metadata" ? status.skippedFound : status.found;
+    }
+
+    function _setLocalStatusesNotFound(hasTrackPath, hasLocalLrcSearch) {
+        metadataStatus = hasTrackPath ? status.notFound : status.skippedConfig;
+        localLrcStatus = hasLocalLrcSearch ? status.notFound : status.skippedConfig;
+    }
+
+    function _applyCachedLyrics(cached, title, artist) {
+        if (!(cached && cached.lines && cached.lines.length > 0))
+            return false;
+        lyricsLines = cached.lines;
+        lyricStatus = lyricState.synced;
+        lyricSource = lyricSrc.cache;
+        cacheStatus = status.cacheHit;
+        metadataStatus = status.skippedFound;
+        localLrcStatus = status.skippedFound;
+        _setRemoteStatusesSkippedFound();
+        _normalizeIdleSourceStatuses();
+        console.info("[MusicLyrics] ✓ Cache: lyrics loaded for \"" + title + "\" (" + cached.lines.length + " lines)");
+        return true;
     }
 
     // -------------------------------------------------------------------------
@@ -161,10 +235,48 @@ PluginComponent {
         return _fnv1a32((title + "\x00" + artist).toLowerCase());
     }
 
-    readonly property string _cacheDir: (Quickshell.env("HOME") || "") + "/.cache/musicLyrics"
+    readonly property string _defaultLyricsDir: "$HOME/.cache/musicLyrics"
+    readonly property string _cacheDir: {
+        return _expandHomePath(pluginData.lyricsDirectory, _defaultLyricsDir);
+    }
+    readonly property string _expandedExtraLrcDirectory: {
+        return _expandHomePath(extraLrcDirectory, "");
+    }
 
     function _cacheFilePath(title, artist) {
         return _cacheDir + "/" + _cacheKey(title, artist) + ".json";
+    }
+
+    function _currentTrackFilePath() {
+        const raw = activePlayer ? (activePlayer.trackUrl || activePlayer.url || "") : "";
+        if (!raw)
+            return "";
+        if (raw.startsWith("file://")) {
+            try {
+                return decodeURIComponent(raw.substring(7));
+            } catch (e) {
+                return raw.substring(7);
+            }
+        }
+        if (raw.startsWith("/"))
+            return raw;
+        return "";
+    }
+
+    function seekToLyricLine(index) {
+        if (!activePlayer || index < 0 || index >= lyricsLines.length)
+            return;
+        const line = lyricsLines[index];
+        if (!line || typeof line.time !== "number" || !Number.isFinite(line.time))
+            return;
+
+        const duration = Math.max(0, activePlayer.length || 0);
+        if (duration > 0) {
+            const clamped = Math.max(0, Math.min(duration * 0.99, line.time));
+            activePlayer.position = clamped;
+        } else {
+            activePlayer.position = Math.max(0, line.time);
+        }
     }
 
     // Static one-shot timer for XHR request timeouts
@@ -199,6 +311,10 @@ PluginComponent {
             return;
         _cacheDirReady = true;
         mkdirProcess.running = true;
+    }
+
+    on_CacheDirChanged: {
+        _cacheDirReady = false;
     }
 
     // Cache read using FileView
@@ -262,6 +378,151 @@ PluginComponent {
         }));
     }
 
+    property var _localLyricsCallback: null
+    property string _localLyricsStdout: ""
+    readonly property string _localLyricsPythonScript: `import json, os, subprocess, sys
+title, artist, track_path, extra_dir = sys.argv[1:5]
+
+def safe_name(s):
+    return (s or "").replace("/", "_").replace("\\\\", "_").strip()
+
+def read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+def find_file_in_dir(base_dir, names):
+    if not base_dir or not os.path.isdir(base_dir):
+        return ""
+    seen = set()
+    for n in names:
+        if not n:
+            continue
+        p = os.path.join(base_dir, n + ".lrc")
+        if p in seen:
+            continue
+        seen.add(p)
+        if os.path.isfile(p):
+            text = read_text(p)
+            if text.strip():
+                return text
+    return ""
+
+def find_file_recursive(root_dir, names):
+    if not root_dir or not os.path.isdir(root_dir):
+        return ""
+    seen = set()
+    for d, _dirs, _files in os.walk(root_dir):
+        for n in names:
+            if not n:
+                continue
+            p = os.path.join(d, n + ".lrc")
+            if p in seen:
+                continue
+            seen.add(p)
+            if os.path.isfile(p):
+                text = read_text(p)
+                if text.strip():
+                    return text
+    return ""
+
+def read_metadata_lrc(path):
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-of", "json", "-show_entries", "format_tags", path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            return ""
+        data = json.loads(proc.stdout)
+        tags = ((data.get("format") or {}).get("tags") or {})
+        for key in ["synchronized_lyrics", "SYNCEDLYRICS", "syncedlyrics", "lyrics", "LYRICS"]:
+            val = tags.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+    except Exception:
+        return ""
+    return ""
+
+base_dir = os.path.dirname(track_path) if track_path else ""
+track_stem = os.path.splitext(os.path.basename(track_path))[0] if track_path else ""
+names = []
+for candidate in [track_stem, safe_name(title), safe_name(artist + " - " + title), safe_name(title + " - " + artist)]:
+    if candidate and candidate not in names:
+        names.append(candidate)
+
+metadata = read_metadata_lrc(track_path)
+if metadata.strip():
+    print(json.dumps({"source": "metadata", "text": metadata}))
+    raise SystemExit(0)
+
+text = find_file_in_dir(base_dir, names)
+if not text.strip():
+    text = find_file_recursive(extra_dir, names)
+if text.strip():
+    print(json.dumps({"source": "file", "text": text}))
+else:
+    print("")`
+
+    Process {
+        id: localLyricsLookupProcess
+        running: false
+        command: []
+
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: function (data) {
+                if (!data)
+                    return;
+                if (root._localLyricsStdout.length > 0)
+                    root._localLyricsStdout += "\n";
+                root._localLyricsStdout += data;
+            }
+        }
+
+        onExited: function () {
+            const callback = root._localLyricsCallback;
+            root._localLyricsCallback = null;
+            if (!callback)
+                return;
+
+            const raw = (root._localLyricsStdout || "").trim();
+            root._localLyricsStdout = "";
+            if (!raw) {
+                callback(null, "");
+                return;
+            }
+
+            try {
+                const payload = JSON.parse(raw);
+                callback(payload.text || null, payload.source || "");
+            } catch (e) {
+                console.warn("[MusicLyrics] Local lyrics parse failed: " + e);
+                callback(null, "");
+            }
+        }
+    }
+
+    function _lookupLocalLyrics(title, artist, callback) {
+        const trackPath = _currentTrackFilePath();
+        const extraDir = _expandedExtraLrcDirectory;
+        if (!trackPath && !extraDir) {
+            callback(null, "");
+            return;
+        }
+        _resetLocalLookupProcess();
+        _localLyricsCallback = callback;
+        localLyricsLookupProcess.command = ["python3", "-c", _localLyricsPythonScript, title || "", artist || "", trackPath || "", extraDir || ""];
+        localLyricsLookupProcess.running = true;
+    }
+
     // -------------------------------------------------------------------------
     // Fetch orchestration
     // -------------------------------------------------------------------------
@@ -272,11 +533,8 @@ PluginComponent {
         if (currentTitle === _lastFetchedTrack && currentArtist === _lastFetchedArtist)
             return;
 
-        // Cancel any in-flight XHR before starting fresh
-        if (_cancelActiveFetch) {
-            _cancelActiveFetch();
-            _cancelActiveFetch = null;
-        }
+        // Cancel any in-flight lookups before starting fresh
+        _cancelInFlightLookups();
 
         _lastFetchedTrack = currentTitle;
         _lastFetchedArtist = currentArtist;
@@ -288,7 +546,7 @@ PluginComponent {
         var capturedTitle = currentTitle;
         var capturedArtist = currentArtist;
 
-        function _startFetch() {
+        function _startRemoteFetch() {
             if (_configValid) {
                 _fetchFromNavidrome(capturedTitle, capturedArtist);
             } else {
@@ -298,20 +556,42 @@ PluginComponent {
             }
         }
 
+        function _startFetch() {
+            const hasTrackPath = !!_currentTrackFilePath();
+            const hasLocalLrcSearch = hasTrackPath || _expandedExtraLrcDirectory !== "";
+            root.metadataStatus = hasTrackPath ? status.searching : status.skippedConfig;
+            root.localLrcStatus = hasLocalLrcSearch ? status.searching : status.skippedConfig;
+
+            _lookupLocalLyrics(capturedTitle, capturedArtist, function (lrcText, localSource) {
+                if (capturedTitle !== root._lastFetchedTrack || capturedArtist !== root._lastFetchedArtist)
+                    return;
+
+                if (lrcText) {
+                    const parsed = root.parseLrc(lrcText);
+                    if (parsed.length > 0) {
+                        root.lyricsLines = parsed;
+                        root.lyricStatus = lyricState.synced;
+                        root.lyricSource = localSource === "metadata" ? lyricSrc.metadata : lyricSrc.localLrc;
+                        root._setLocalStatusesForSource(localSource, hasTrackPath);
+                        root._setRemoteStatusesSkippedFound();
+                        console.info("[MusicLyrics] ✓ Local " + localSource + ": synced lyrics found (" + parsed.length + " lines) for \"" + capturedTitle + "\"");
+                        if (root.cachingEnabled)
+                            root.writeToCache(capturedTitle, capturedArtist, parsed, root.lyricSource);
+                        return;
+                    }
+                }
+
+                root._setLocalStatusesNotFound(hasTrackPath, hasLocalLrcSearch);
+                _startRemoteFetch();
+            });
+        }
+
         if (cachingEnabled) {
             readFromCache(capturedTitle, capturedArtist, function (cached) {
                 // Guard: track may have changed while the file read was in progress
                 if (capturedTitle !== root._lastFetchedTrack || capturedArtist !== root._lastFetchedArtist)
                     return;
-                if (cached && cached.lines && cached.lines.length > 0) {
-                    root.lyricsLines = cached.lines;
-                    root.lyricStatus = lyricState.synced;
-                    root.lyricSource = cached.source > 0 ? cached.source : lyricSrc.cache;
-                    root.cacheStatus = status.cacheHit;
-                    root.navidromeStatus = status.skippedFound;
-                    root.lrclibStatus = status.skippedFound;
-                    root.musixmatchStatus = status.skippedFound;
-                    console.info("[MusicLyrics] ✓ Cache: lyrics loaded for \"" + capturedTitle + "\" (" + cached.lines.length + " lines)");
+                if (root._applyCachedLyrics(cached, capturedTitle, capturedArtist)) {
                     return;
                 }
                 root.cacheStatus = status.cacheMiss;
@@ -319,6 +599,7 @@ PluginComponent {
             });
         } else {
             cacheStatus = status.cacheDisabled;
+            _normalizeIdleSourceStatuses();
             _startFetch();
         }
     }
@@ -923,71 +1204,119 @@ PluginComponent {
 
     Component {
         id: hPillComponent
-        Row {
-            spacing: Theme.spacingS
+        Item {
+            implicitWidth: contentRow.implicitWidth
+            implicitHeight: contentRow.implicitHeight
 
-            Rectangle {
-                width: chipContent.implicitWidth + Theme.spacingS * 2
-                height: Theme.fontSizeSmall + Theme.spacingXS
-                radius: 12
-                anchors.verticalCenter: parent.verticalCenter
-                color: Theme.primary
+            Row {
+                id: contentRow
+                spacing: Theme.spacingS
 
-                Row {
-                    id: chipContent
-                    anchors.centerIn: parent
-                    spacing: Theme.spacingXS
+                Rectangle {
+                    width: chipContent.implicitWidth + Theme.spacingS * 2
+                    height: Theme.fontSizeSmall + Theme.spacingXS
+                    radius: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: Theme.primary
 
-                    DankIcon {
-                        anchors.verticalCenter: parent.verticalCenter
-                        name: activePlayer && activePlayer.playbackState === MprisPlaybackState.Playing ? "lyrics" : "pause"
-                        size: Theme.fontSizeSmall
-                        color: Theme.background
+                    Row {
+                        id: chipContent
+                        anchors.centerIn: parent
+                        spacing: Theme.spacingXS
+
+                        DankIcon {
+                            anchors.verticalCenter: parent.verticalCenter
+                            name: activePlayer && activePlayer.playbackState === MprisPlaybackState.Playing ? "lyrics" : "pause"
+                            size: Theme.fontSizeSmall
+                            color: Theme.background
+                        }
+
+                        StyledText {
+                            text: root.lyricSource === lyricSrc.navidrome ? "Navidrome"
+                                  : root.lyricSource === lyricSrc.lrclib ? "lrclib"
+                                  : root.lyricSource === lyricSrc.musixmatch ? "Musixmatch"
+                                  : root.lyricSource === lyricSrc.metadata ? "Metadata"
+                                  : (root.lyricSource === lyricSrc.localLrc || root.lyricSource === lyricSrc.local) ? "Local .lrc"
+                                  : root.lyricSource === lyricSrc.cache ? "Cache"
+                                  : ""
+                            font.pixelSize: Theme.fontSizeSmall
+                            color: Theme.background
+                            anchors.verticalCenter: parent.verticalCenter
+                            maximumLineCount: 1
+                            elide: Text.ElideRight
+                            visible: root.lyricsLines.length > 0
+                        }
                     }
+                }
 
-                    StyledText {
-                        text: root.lyricSource === lyricSrc.navidrome ? "Navidrome" : root.lyricSource === lyricSrc.lrclib ? "lrclib" : root.lyricSource === lyricSrc.musixmatch ? "Musixmatch" : ""
-                        font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.background
-                        anchors.verticalCenter: parent.verticalCenter
-                        maximumLineCount: 1
-                        elide: Text.ElideRight
-                        visible: root.lyricsLines.length > 0
-                    }
+                StyledText {
+                    text: root.currentLyricText
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.surfaceText
+                    anchors.verticalCenter: parent.verticalCenter
+                    maximumLineCount: 1
+                    elide: Text.ElideRight
+                    width: Math.min(implicitWidth, 300)
                 }
             }
 
-            StyledText {
-                text: root.currentLyricText
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceText
-                anchors.verticalCenter: parent.verticalCenter
-                maximumLineCount: 1
-                elide: Text.ElideRight
-                width: Math.min(implicitWidth, 300)
+            MouseArea {
+                id: hInteractiveArea
+                anchors.fill: parent
+                enabled: root.statusPaneButton === "middle" || root.lyricsPaneButton === "middle"
+                acceptedButtons: Qt.MiddleButton
+                z: 1000
+                onPressed: mouse => {
+                    root.handleMappedMouseAction("middle", contentRow, 0, 0, 0, "", null)
+                    mouse.accepted = true
+                }
             }
         }
     }
 
     verticalBarPill: root.activePlayer ? vPillComponent : null
+    pillClickAction: (x, y, width, section, screen) => {
+        handleMappedMouseAction("left", null, x, y, width, section, screen)
+    }
+    pillRightClickAction: (x, y, width, section, screen) => {
+        handleMappedMouseAction("right", null, x, y, width, section, screen)
+    }
 
     Component {
         id: vPillComponent
-        Column {
-            spacing: Theme.spacingXS
+        Item {
+            implicitWidth: contentColumn.implicitWidth
+            implicitHeight: contentColumn.implicitHeight
 
-            DankIcon {
-                name: "lyrics"
-                size: Theme.iconSize
-                color: root.lyricsLines.length > 0 ? Theme.primary : Theme.surfaceVariantText
-                anchors.horizontalCenter: parent.horizontalCenter
+            Column {
+                id: contentColumn
+                spacing: Theme.spacingXS
+
+                DankIcon {
+                    name: "lyrics"
+                    size: Theme.iconSize
+                    color: root.lyricsLines.length > 0 ? Theme.primary : Theme.surfaceVariantText
+                    anchors.horizontalCenter: parent.horizontalCenter
+                }
+
+                StyledText {
+                    text: "♪"
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.surfaceText
+                    anchors.horizontalCenter: parent.horizontalCenter
+                }
             }
 
-            StyledText {
-                text: "♪"
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceText
-                anchors.horizontalCenter: parent.horizontalCenter
+            MouseArea {
+                id: vInteractiveArea
+                anchors.fill: parent
+                enabled: root.statusPaneButton === "middle" || root.lyricsPaneButton === "middle"
+                acceptedButtons: Qt.MiddleButton
+                z: 1000
+                onPressed: mouse => {
+                    root.handleMappedMouseAction("middle", contentColumn, 0, 0, 0, "", null)
+                    mouse.accepted = true
+                }
             }
         }
     }
@@ -1001,6 +1330,237 @@ PluginComponent {
         var m = Math.floor(seconds / 60);
         var s = Math.floor(seconds % 60);
         return m + ":" + ("0" + s).slice(-2);
+    }
+
+    function mappedActionForButton(button) {
+        // If both actions use the same button, prioritize Lyrics pane.
+        if (lyricsPaneButton === button)
+            return "lyrics";
+        if (statusPaneButton === button)
+            return "status";
+        return "none";
+    }
+
+    function handleMappedMouseAction(button, sourceItem, x, y, width, triggerSection, screenObj) {
+        const action = mappedActionForButton(button);
+        if (action === "status") {
+            const savedPillClickAction = root.pillClickAction;
+            root.pillClickAction = null;
+            try {
+                root.triggerPopout();
+            } finally {
+                root.pillClickAction = savedPillClickAction;
+            }
+            return;
+        }
+        if (action !== "lyrics")
+            return;
+
+        if (sourceItem) {
+            const currentScreen = parentScreen || Screen;
+            const globalPos = sourceItem.mapToItem(null, 0, 0);
+            const barPosition = axis?.edge === "left" ? 2 : (axis?.edge === "right" ? 3 : (axis?.edge === "bottom" ? 1 : 0));
+            const triggerWidth = Math.max(barThickness || 0, sourceItem.width || 0, sourceItem.implicitWidth || 0);
+            const pos = SettingsData.getPopupTriggerPosition(globalPos, currentScreen, barThickness, triggerWidth, barSpacing, barPosition, barConfig);
+            toggleLyricsOnlyPopout(pos.x, pos.y, pos.width, root.section, currentScreen);
+            return;
+        }
+
+        toggleLyricsOnlyPopout(x, y, width, triggerSection, screenObj);
+    }
+
+    function toggleLyricsOnlyPopout(x, y, width, triggerSection, screenObj) {
+        const currentScreen = screenObj || parentScreen || Screen
+        if (!currentScreen)
+            return
+        const barPosition = axis?.edge === "left" ? 2 : (axis?.edge === "right" ? 3 : (axis?.edge === "bottom" ? 1 : 0))
+
+        lyricsOnlyPopout.setTriggerPosition(
+            x || 0,
+            y || 0,
+            width || barThickness,
+            triggerSection || section || "",
+            currentScreen,
+            barPosition,
+            barThickness,
+            barSpacing,
+            barConfig
+        )
+        lyricsOnlyPopout.toggle()
+    }
+
+    DankPopout {
+        id: lyricsOnlyPopout
+        layerNamespace: "dms:musiclyrics-lyrics-only"
+        popupWidth: 500
+        popupHeight: 620
+        onBackgroundClicked: close()
+
+        content: Component {
+            Rectangle {
+                id: lyricsPane
+                width: parent.width
+                height: 560
+                radius: Theme.cornerRadius
+                color: Theme.surfaceContainer
+                property bool autoScrollPaused: false
+                property bool autoScrollInternal: false
+
+                function pauseAutoScroll() {
+                    autoScrollPaused = true;
+                    autoScrollResumeTimer.restart();
+                }
+
+                function syncToCurrentLine() {
+                    if (autoScrollPaused || root.currentLineIndex < 0 || !lyricsFlick.visibleArea)
+                        return;
+                    const item = lineRepeater.itemAt(root.currentLineIndex);
+                    if (!item)
+                        return;
+
+                    const pad = Math.max(12, Theme.spacingM);
+                    const top = lyricsFlick.contentY;
+                    const bottom = top + lyricsFlick.height;
+                    const itemTop = item.y;
+                    const itemBottom = item.y + item.height;
+                    const alreadyVisible = itemTop >= (top + pad) && itemBottom <= (bottom - pad);
+                    if (alreadyVisible)
+                        return;
+
+                    const maxY = Math.max(0, lyricsFlick.contentHeight - lyricsFlick.height);
+                    const target = Math.max(0, Math.min(maxY, itemTop - lyricsFlick.height * 0.35));
+                    autoScrollInternal = true;
+                    lyricsFlick.contentY = target;
+                    autoScrollInternal = false;
+                }
+
+                Timer {
+                    id: autoScrollResumeTimer
+                    interval: 5000
+                    repeat: false
+                    onTriggered: {
+                        lyricsPane.autoScrollPaused = false;
+                        lyricsPane.syncToCurrentLine();
+                    }
+                }
+
+                Connections {
+                    target: root
+                    function onCurrentLineIndexChanged() {
+                        Qt.callLater(lyricsPane.syncToCurrentLine);
+                    }
+                    function onLyricsLinesChanged() {
+                        Qt.callLater(lyricsPane.syncToCurrentLine);
+                    }
+                }
+
+                Component.onCompleted: Qt.callLater(syncToCurrentLine)
+                onVisibleChanged: if (visible) Qt.callLater(syncToCurrentLine)
+
+                Flickable {
+                    id: lyricsFlick
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacingM
+                    clip: true
+                    contentHeight: lyricsColumn.implicitHeight
+                    onMovementStarted: {
+                        if (!lyricsPane.autoScrollInternal)
+                            lyricsPane.pauseAutoScroll();
+                    }
+                    Behavior on contentY {
+                        NumberAnimation {
+                            duration: 180
+                            easing.type: Easing.OutCubic
+                        }
+                    }
+
+                    WheelHandler {
+                        target: lyricsFlick
+                        onWheel: lyricsPane.pauseAutoScroll()
+                    }
+
+                    Column {
+                        id: lyricsColumn
+                        width: lyricsFlick.width
+                        spacing: Theme.spacingS
+
+                        StyledText {
+                            text: "Lyrics"
+                            font.pixelSize: Theme.fontSizeLarge
+                            font.weight: Font.DemiBold
+                            color: Theme.primary
+                        }
+
+                        StyledText {
+                            text: root.currentTitle || "No track"
+                            font.pixelSize: Theme.fontSizeLarge
+                            font.weight: Font.DemiBold
+                            color: Theme.surfaceText
+                            maximumLineCount: 2
+                            wrapMode: Text.WordWrap
+                        }
+
+                        StyledText {
+                            text: root.currentArtist || ""
+                            font.pixelSize: Theme.fontSizeSmall
+                            color: Theme.surfaceVariantText
+                            visible: text.length > 0
+                            maximumLineCount: 1
+                            elide: Text.ElideRight
+                        }
+
+                        Rectangle {
+                            width: parent.width
+                            height: 1
+                            color: Theme.outline
+                            opacity: 0.4
+                        }
+
+                        StyledText {
+                            visible: root.lyricsLoading
+                            text: "Searching lyrics..."
+                            font.pixelSize: Theme.fontSizeMedium
+                            color: Theme.surfaceVariantText
+                        }
+
+                        StyledText {
+                            visible: !root.lyricsLoading && root.lyricsLines.length === 0
+                            text: "No lyrics found."
+                            font.pixelSize: Theme.fontSizeMedium
+                            color: Theme.surfaceVariantText
+                        }
+
+                        Repeater {
+                            id: lineRepeater
+                            model: root.lyricsLines.length
+                            delegate: Item {
+                                required property int index
+                                width: lyricsColumn.width
+                                implicitHeight: lineText.implicitHeight
+
+                                StyledText {
+                                    id: lineText
+                                    text: root.lyricsLines[index].text || ""
+                                    width: parent.width
+                                    wrapMode: Text.WordWrap
+                                    font.pixelSize: Theme.fontSizeMedium
+                                    color: index === root.currentLineIndex ? Theme.primary : Theme.surfaceText
+                                    font.weight: index === root.currentLineIndex ? Font.DemiBold : Font.Normal
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    enabled: !!root.activePlayer
+                                    hoverEnabled: enabled
+                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: root.seekToLyricLine(index)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     popoutContent: Component {
@@ -1222,6 +1782,20 @@ PluginComponent {
                             icon: "cached"
                             label: "Cache"
                             sourceStatus: root.cacheStatus
+                        }
+
+                        SourceCard {
+                            width: parent.width
+                            icon: "badge"
+                            label: "Metadata"
+                            sourceStatus: root.metadataStatus
+                        }
+
+                        SourceCard {
+                            width: parent.width
+                            icon: "description"
+                            label: "Local .lrc"
+                            sourceStatus: root.localLrcStatus
                         }
 
                         SourceCard {
